@@ -118,9 +118,13 @@ public class FlutterFirebaseMessagingBackgroundExecutor implements MethodCallHan
    */
   public void startBackgroundIsolate() {
     if (isNotRunning()) {
-      long callbackHandle = getPluginCallbackHandle();
-      if (callbackHandle != 0) {
-        startBackgroundIsolate(callbackHandle, null);
+      try {
+        long callbackHandle = getPluginCallbackHandle();
+        if (callbackHandle != 0) {
+          startBackgroundIsolate(callbackHandle, null);
+        }
+      } catch (Exception e) {
+        Log.e(TAG, "Start Background Isolate Error.");
       }
     }
   }
@@ -159,40 +163,44 @@ public class FlutterFirebaseMessagingBackgroundExecutor implements MethodCallHan
               null,
               mainHandler,
               () -> {
-                String appBundlePath = loader.findAppBundlePath();
-                AssetManager assets = ContextHolder.getApplicationContext().getAssets();
-                if (isNotRunning()) {
-                  if (shellArgs != null) {
-                    Log.i(
-                        TAG,
-                        "Creating background FlutterEngine instance, with args: "
-                            + Arrays.toString(shellArgs.toArray()));
-                    backgroundFlutterEngine =
-                        new FlutterEngine(
-                            ContextHolder.getApplicationContext(), shellArgs.toArray());
-                  } else {
-                    Log.i(TAG, "Creating background FlutterEngine instance.");
-                    backgroundFlutterEngine =
-                        new FlutterEngine(ContextHolder.getApplicationContext());
+                try {
+                  String appBundlePath = loader.findAppBundlePath();
+                  AssetManager assets = ContextHolder.getApplicationContext().getAssets();
+                  if (isNotRunning()) {
+                    if (shellArgs != null) {
+                      Log.i(
+                          TAG,
+                          "Creating background FlutterEngine instance, with args: "
+                              + Arrays.toString(shellArgs.toArray()));
+                      backgroundFlutterEngine =
+                          new FlutterEngine(
+                              ContextHolder.getApplicationContext(), shellArgs.toArray());
+                    } else {
+                      Log.i(TAG, "Creating background FlutterEngine instance.");
+                      backgroundFlutterEngine =
+                          new FlutterEngine(ContextHolder.getApplicationContext());
+                    }
+                    // We need to create an instance of `FlutterEngine` before looking up the
+                    // callback. If we don't, the callback cache won't be initialized and the
+                    // lookup will fail.
+                    FlutterCallbackInformation flutterCallback =
+                        FlutterCallbackInformation.lookupCallbackInformation(callbackHandle);
+  
+                    if (flutterCallback == null) {
+                      Log.e(TAG, "Failed to find registered callback");
+                      return;
+                    }
+  
+                    DartExecutor executor = backgroundFlutterEngine.getDartExecutor();
+                    initializeMethodChannel(executor);
+  
+                    DartCallback dartCallback =
+                        new DartCallback(assets, appBundlePath, flutterCallback);
+  
+                    executor.executeDartCallback(dartCallback);
                   }
-                  // We need to create an instance of `FlutterEngine` before looking up the
-                  // callback. If we don't, the callback cache won't be initialized and the
-                  // lookup will fail.
-                  FlutterCallbackInformation flutterCallback =
-                      FlutterCallbackInformation.lookupCallbackInformation(callbackHandle);
-
-                  if (flutterCallback == null) {
-                    Log.e(TAG, "Failed to find registered callback");
-                    return;
-                  }
-
-                  DartExecutor executor = backgroundFlutterEngine.getDartExecutor();
-                  initializeMethodChannel(executor);
-
-                  DartCallback dartCallback =
-                      new DartCallback(assets, appBundlePath, flutterCallback);
-
-                  executor.executeDartCallback(dartCallback);
+                } catch (Exception e) {
+                  Log.e(TAG, "Start Background Isolate Error.");
                 }
               });
         };
@@ -210,66 +218,70 @@ public class FlutterFirebaseMessagingBackgroundExecutor implements MethodCallHan
    * corresponds to a callback registered with the Dart VM.
    */
   public void executeDartCallbackInBackgroundIsolate(Intent intent, final CountDownLatch latch) {
-    if (backgroundFlutterEngine == null) {
-      Log.i(
-          TAG,
-          "A background message could not be handled in Dart as no onBackgroundMessage handler has been registered.");
-      return;
-    }
-
-    Result result = null;
-    if (latch != null) {
-      result =
-          new Result() {
-            @Override
-            public void success(Object result) {
-              // If another thread is waiting, then wake that thread when the callback returns a result.
-              latch.countDown();
-            }
-
-            @Override
-            public void error(String errorCode, String errorMessage, Object errorDetails) {
-              latch.countDown();
-            }
-
-            @Override
-            public void notImplemented() {
-              latch.countDown();
-            }
-          };
-    }
-    // RemoteMessage is passed as byte array. Check it exists first
-    byte[] parcelBytes =
-        intent.getByteArrayExtra(FlutterFirebaseMessagingUtils.EXTRA_REMOTE_MESSAGE);
-    if (parcelBytes != null) {
-      Parcel parcel = Parcel.obtain();
-      try {
-        // This converts raw byte array into data and request this happens on the entire array
-        parcel.unmarshall(parcelBytes, 0, parcelBytes.length);
-        // Sets the starting position of the data which is 0 on array
-        parcel.setDataPosition(0);
-
-        // Now recreate the RemoteMessage from the Parcel
-        RemoteMessage remoteMessage = RemoteMessage.CREATOR.createFromParcel(parcel);
-        Map<String, Object> remoteMessageMap =
-            FlutterFirebaseMessagingUtils.remoteMessageToMap(remoteMessage);
-
-        backgroundChannel.invokeMethod(
-            "MessagingBackground#onMessage",
-            new HashMap<String, Object>() {
-              {
-                put("userCallbackHandle", getUserCallbackHandle());
-                put("message", remoteMessageMap);
-              }
-            },
-            result);
-
-      } finally {
-        // Recycle the Parcel when done
-        parcel.recycle();
+    try {
+      if (backgroundFlutterEngine == null) {
+        Log.i(
+            TAG,
+            "A background message could not be handled in Dart as no onBackgroundMessage handler has been registered.");
+        return;
       }
-    } else {
-      Log.e(TAG, "RemoteMessage byte array not found in Intent.");
+  
+      Result result = null;
+      if (latch != null) {
+        result =
+            new Result() {
+              @Override
+              public void success(Object result) {
+                // If another thread is waiting, then wake that thread when the callback returns a result.
+                latch.countDown();
+              }
+  
+              @Override
+              public void error(String errorCode, String errorMessage, Object errorDetails) {
+                latch.countDown();
+              }
+  
+              @Override
+              public void notImplemented() {
+                latch.countDown();
+              }
+            };
+      }
+      // RemoteMessage is passed as byte array. Check it exists first
+      byte[] parcelBytes =
+          intent.getByteArrayExtra(FlutterFirebaseMessagingUtils.EXTRA_REMOTE_MESSAGE);
+      if (parcelBytes != null) {
+        Parcel parcel = Parcel.obtain();
+        try {
+          // This converts raw byte array into data and request this happens on the entire array
+          parcel.unmarshall(parcelBytes, 0, parcelBytes.length);
+          // Sets the starting position of the data which is 0 on array
+          parcel.setDataPosition(0);
+  
+          // Now recreate the RemoteMessage from the Parcel
+          RemoteMessage remoteMessage = RemoteMessage.CREATOR.createFromParcel(parcel);
+          Map<String, Object> remoteMessageMap =
+              FlutterFirebaseMessagingUtils.remoteMessageToMap(remoteMessage);
+  
+          backgroundChannel.invokeMethod(
+              "MessagingBackground#onMessage",
+              new HashMap<String, Object>() {
+                {
+                  put("userCallbackHandle", getUserCallbackHandle());
+                  put("message", remoteMessageMap);
+                }
+              },
+              result);
+  
+        } finally {
+          // Recycle the Parcel when done
+          parcel.recycle();
+        }
+      } else {
+        Log.e(TAG, "RemoteMessage byte array not found in Intent.");
+      }
+    } catch (Exception e) {
+      Log.e(TAG, "Dart Callback Background Isolate Error.");
     }
   }
 
